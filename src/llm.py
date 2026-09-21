@@ -1,6 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen3-8B"
 
 class LocalLLM:
     def __init__(self):
@@ -20,6 +20,9 @@ class LocalLLM:
             {"role": "user", "content": user_prompt},
         ]
 
+        return self.generate_messages(messages)
+
+    def generate_messages(self, messages: list[dict]) -> str:
         text = self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -37,7 +40,6 @@ class LocalLLM:
             max_new_tokens=300,
         )
 
-        # Remove the original prompt tokens from the output.
         generated_tokens = outputs[0][inputs.input_ids.shape[1]:]
 
         return self.tokenizer.decode(
