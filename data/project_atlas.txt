@@ -1,0 +1,11 @@
+Project: Atlas
+
+Latest meeting:
+- Team discussed using event-driven processing.
+- Final architecture has not been selected.
+- Sarah will investigate Kafka.
+- Need architect feedback on retry handling.
+
+Open questions:
+- Kafka vs existing messaging platform?
+- How should failed events be retried?
