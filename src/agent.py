@@ -1,62 +1,49 @@
 import asyncio
+import json
 import sys
-
+import logging
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
 from llm import LocalLLM
 
-
-SYSTEM_PROMPT = """
-You are My AI Brain.
-
-You have access to the tools listed below:
-
-{tools}
-
-If the user asks for information that requires one of these tools,
-you MUST use the appropriate tool before answering.
-
-To use a tool, output:
-
-TOOL: <tool name>
-PROJECT: <project name>
-
-After receiving a TOOL OBSERVATION, answer using ONLY the retrieved evidence.
-
-Then output:
-
-FINAL: <answer>
-
-Do not invent information.
-""".strip()
+logging.getLogger("mcp").setLevel(logging.WARNING)
+logging.getLogger("googleapiclient").setLevel(logging.WARNING)
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 
 def parse_tool_request(response: str):
     """
-    Parse a tool request produced by the LLM.
+    Parse a tool request from the LLM.
 
     Expected format:
-        TOOL: read_project_notes
-        PROJECT: Atlas
+
+    TOOL: <tool name>
+    ARGS: <valid JSON object>
     """
     tool_name = None
-    project = None
+    arguments = None
 
     for line in response.splitlines():
         line = line.strip()
 
         if line.startswith("TOOL:"):
-            tool_name = line.split(":", 1)[1].strip()
+            tool_name = line[len("TOOL:"):].strip()
 
-        elif line.startswith("PROJECT:"):
-            project = line.split(":", 1)[1].strip()
+        elif line.startswith("ARGS:"):
+            args_text = line[len("ARGS:"):].strip()
 
-    if tool_name and project:
-        return tool_name, project
+            try:
+                arguments = json.loads(args_text)
+            except json.JSONDecodeError:
+                return None, None
 
-    return None
+    return tool_name, arguments
+
 
 async def build_system_prompt(session: ClientSession) -> str:
+    """
+    Discover the tools exposed by the MCP server and build
+    a system prompt describing them to the model.
+    """
     tools_result = await session.list_tools()
 
     tool_descriptions = []
@@ -64,44 +51,101 @@ async def build_system_prompt(session: ClientSession) -> str:
     for tool in tools_result.tools:
         tool_descriptions.append(
             f"""
-Tool: {tool.name}
+Tool name: {tool.name}
 Description: {tool.description}
-Input schema: {tool.inputSchema}
+Input schema: {json.dumps(tool.inputSchema)}
 """.strip()
         )
 
     tools_text = "\n\n".join(tool_descriptions)
 
-    return SYSTEM_PROMPT.format(tools=tools_text)
+    return f"""
+You are My AI Brain, a work assistant that helps users retrieve
+and reason over their work information.
+
+You have access to tools through MCP.
+
+AVAILABLE TOOLS:
+
+{tools_text}
+
+When you need information from a tool, respond using exactly:
+
+TOOL: <tool name>
+ARGS: <valid JSON object>
+
+Use the tool descriptions and input schemas above to determine
+the correct arguments.
+
+You may call multiple tools when needed.
+
+For example, if the user asks about information in Google Docs
+but does not provide a document ID:
+
+1. Search for the relevant Google Doc.
+2. Read the relevant document using the document ID returned
+   by the search.
+3. Answer using the retrieved document contents.
+
+Do not invent tool results, document IDs, project information,
+or other facts that should come from a tool.
+
+When you have enough information to answer the user's question,
+respond normally with the answer.
+
+Do not include TOOL or ARGS unless you actually want to call a tool.
+""".strip()
+
 
 async def run_agent(
-    llm: LocalLLM,
     session: ClientSession,
-    question: str,
-    conversation_history: list[dict],
-):
+    llm: LocalLLM,
+    user_question: str,
+    conversation_history: list,
+) -> str:
+    """
+    Run one user turn.
+
+    The model can either:
+      1. request an MCP tool, or
+      2. return a normal answer.
+
+    Tool observations are fed back to the model so it can
+    continue reasoning and optionally call another tool.
+    """
     system_prompt = await build_system_prompt(session)
 
     messages = [
-        {"role": "system", "content": system_prompt},
-        *conversation_history,
-        {"role": "user", "content": question},
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
     ]
 
+    # Short-term memory:
+    # include only the most recent conversation messages.
+    messages.extend(conversation_history[-6:])
+
+    messages.append(
+        {
+            "role": "user",
+            "content": user_question,
+        }
+    )
+
     # Keep the loop bounded so the agent cannot call tools forever.
-    for _ in range(3):
+    for _ in range(5):
         response = llm.generate_messages(messages)
-        print(f"\n[DEBUG] LLM response:\n{response}\n")
-        tool_request = parse_tool_request(response)
 
-        if tool_request:
-            tool_name, project = tool_request
+        tool_name, arguments = parse_tool_request(response)
 
-            print(f"[Agent] Calling tool: {tool_name}({project})")
+        # If the model requested a tool, execute it through MCP.
+        if tool_name and arguments is not None:
+            print(f"[Tool] {tool_name}")
 
             result = await session.call_tool(
                 tool_name,
-                arguments={"project": project},
+                arguments=arguments,
             )
 
             observation = "\n".join(
@@ -110,10 +154,15 @@ async def run_agent(
                 if hasattr(content, "text")
             )
 
+            # Preserve the model's tool request in the working context.
             messages.append(
-                {"role": "assistant", "content": response}
+                {
+                    "role": "assistant",
+                    "content": response,
+                }
             )
 
+            # Feed the tool result back to the model.
             messages.append(
                 {
                     "role": "user",
@@ -121,89 +170,78 @@ async def run_agent(
 TOOL OBSERVATION:
 {observation}
 
-Now answer the original user question using this evidence.
+Continue answering the original user question.
+Use another tool if necessary.
+Otherwise, provide the final answer.
 """.strip(),
                 }
             )
 
             continue
 
+        # No valid tool request means the model is done.
+        # Support FINAL: if the model happens to use it,
+        # but do not require it.
         if response.startswith("FINAL:"):
             return response.removeprefix("FINAL:").strip()
 
-        # The model did not follow the TOOL / FINAL protocol.
-        # Ask it to retry instead of accepting the malformed response.
-        messages.append(
-            {"role": "assistant", "content": response}
-        )
+        return response.strip()
 
-        messages.append(
-            {
-                "role": "user",
-                "content": """
-        Your previous response did not follow the required protocol.
-
-        For project-specific questions, you MUST request the project tool.
-
-        Respond only with one of these formats:
-
-        TOOL: read_project_notes
-        PROJECT: <project name>
-
-        or
-
-        FINAL: <answer>
-        """.strip(),
-            }
-        )
-
-        continue
-
-    return "I culd not complete the request within the allowed tool steps."
+    return "I could not complete the request within the allowed tool steps."
 
 
 async def main():
     llm = LocalLLM()
-    conversation_history = []
 
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["src/mcp_server.py"],
     )
 
+    conversation_history = []
+
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            print("\nMy AI Brain - Module 2")
-            print("Type 'exit' to quit.\n")
+            print("My AI Brain is ready.")
+            print("Type 'exit' or 'quit' to stop.\n")
 
             while True:
-                question = input("You: ").strip()
+                user_question = input("You: ").strip()
 
-                if not question:
-                    continue
-
-                if question.lower() == "exit":
+                if user_question.lower() in {"exit", "quit"}:
                     break
 
+                if not user_question:
+                    continue
+
                 answer = await run_agent(
-                    llm=llm,
                     session=session,
-                    question=question,
+                    llm=llm,
+                    user_question=user_question,
                     conversation_history=conversation_history,
                 )
 
+                print(f"\nMy AI Brain: {answer}\n")
+
+                # Store this interaction in short-term memory.
                 conversation_history.append(
-                    {"role": "user", "content": question}
+                    {
+                        "role": "user",
+                        "content": user_question,
+                    }
                 )
 
                 conversation_history.append(
-                    {"role": "assistant", "content": answer}
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                    }
                 )
+
+                # Keep short-term memory bounded.
                 conversation_history = conversation_history[-6:]
-
-    print(f"\nMy AI Brain: {answer}\n")
 
 
 if __name__ == "__main__":
