@@ -82,7 +82,14 @@ def read_google_doc(document_id: str) -> str:
     return f"Document: {document['title']}\n\n{text}"
 
 
-def search_google_docs(query: str) -> str:
+def search_google_docs(query: str):
+    """
+    Search Google Drive for Google Docs whose filename contains the query.
+
+    Returns structured document metadata so callers can use the
+    document ID programmatically.
+    """
+
     credentials = get_credentials()
 
     drive_service = build(
@@ -91,36 +98,22 @@ def search_google_docs(query: str) -> str:
         credentials=credentials,
     )
 
-    safe_query = query.replace("'", "\\'")
+    escaped_query = query.replace("'", "\\'")
 
     drive_query = (
         "mimeType='application/vnd.google-apps.document' "
         "and trashed=false "
-        f"and name contains '{safe_query}'"
+        f"and name contains '{escaped_query}'"
     )
 
-    result = (
+    response = (
         drive_service.files()
         .list(
             q=drive_query,
-            fields="files(id, name, modifiedTime)",
+            fields="files(id,name,modifiedTime)",
             pageSize=10,
         )
         .execute()
     )
 
-    files = result.get("files", [])
-
-    if not files:
-        return f"No Google Docs found matching '{query}'."
-
-    lines = []
-
-    for file in files:
-        lines.append(
-            f"Title: {file['name']}\n"
-            f"Document ID: {file['id']}\n"
-            f"Modified: {file.get('modifiedTime', 'unknown')}"
-        )
-
-    return "\n\n".join(lines)
+    return response.get("files", [])

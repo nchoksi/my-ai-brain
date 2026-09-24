@@ -382,3 +382,76 @@ The objective is not to add every possible tool or agent pattern. Each module
 adds only the concepts that improve the core goal of My AI Brain: reliably
 remembering and retrieving work context while keeping the architecture small
 enough to implement, understand, and evaluate.
+
+## Module 3 — RAG and Semantic Memory
+
+Module 3 extends My AI Brain with Retrieval-Augmented Generation (RAG) and semantic long-term memory.
+
+### RAG Pipeline
+
+The current retrieval pipeline is:
+
+User Question
+→ Query Embedding
+→ Semantic Search
+→ Top-K Relevant Chunks
+→ Retrieved Context
+→ Qwen3-8B
+→ Grounded Answer
+
+### Embeddings and Retrieval
+
+The project uses `BAAI/bge-small-en-v1.5` through Sentence Transformers to generate normalized embeddings.
+
+Retrieved chunks are ranked using cosine similarity. The initial retrieval configuration uses `top_k=3`.
+
+### Chunking
+
+Documents are split into relatively small topical chunks before embedding.
+
+During testing, paragraph-level chunking produced overly fragmented Google Docs content. The chunking strategy was refined to group related short paragraphs into larger semantic units while avoiding excessively large chunks.
+
+### Metadata
+
+Each indexed chunk can carry metadata such as:
+
+- project
+- source
+- document ID
+- source type
+- modification time
+
+This provides the foundation for later handling of outdated or conflicting project information.
+
+### Google Docs → Semantic Memory
+
+Google Docs can now be:
+
+1. discovered through the Google Drive API,
+2. read through the Google Docs API,
+3. chunked and embedded,
+4. indexed into semantic memory,
+5. retrieved using semantic similarity.
+
+### MCP Semantic Memory Tools
+
+Module 3 adds two MCP tools:
+
+- `index_google_doc` — loads a Google Doc into semantic memory.
+- `search_memory` — performs semantic top-k retrieval over indexed project knowledge.
+
+The MCP server now exposes:
+
+- `read_project_notes`
+- `search_google_docs`
+- `read_google_doc`
+- `index_google_doc`
+- `search_memory`
+
+This allows My AI Brain to access both external source systems and semantic memory through the same MCP interface.
+
+### Current Limitation
+
+The vector store is currently in memory. Indexed embeddings are lost when the MCP server exits.
+
+Persistent vector storage is intentionally deferred to a later iteration so the current implementation remains focused on demonstrating the core RAG workflow.
