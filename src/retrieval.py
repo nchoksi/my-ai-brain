@@ -9,7 +9,6 @@ EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 class Retriever:
     def __init__(self):
-
         self.model = SentenceTransformer(EMBEDDING_MODEL)
 
         # In-memory vector database for our initial RAG implementation.
@@ -42,9 +41,17 @@ class Retriever:
             }
         )
 
-    def retrieve(self, query: str, top_k: int = 3):
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 3,
+        project: str | None = None,
+    ):
         """
         Retrieve the chunks most semantically similar to the query.
+
+        If project is provided, only chunks belonging to that
+        project are considered before semantic ranking.
         """
 
         query_embedding = self.model.encode(
@@ -56,6 +63,21 @@ class Retriever:
         results = []
 
         for item in self.vector_db:
+            metadata = item["metadata"]
+
+            # Optional metadata filtering.
+            #
+            # Project comparison is case-insensitive so "atlas"
+            # and "Atlas" refer to the same project.
+            if project:
+                item_project = metadata.get("project")
+
+                if (
+                    not item_project
+                    or item_project.lower() != project.lower()
+                ):
+                    continue
+
             # Because both embeddings are normalized,
             # dot product is equivalent to cosine similarity.
             similarity = torch.dot(
@@ -66,7 +88,7 @@ class Retriever:
             results.append(
                 {
                     "text": item["text"],
-                    "metadata": item["metadata"],
+                    "metadata": metadata,
                     "score": similarity,
                 }
             )

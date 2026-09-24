@@ -132,11 +132,13 @@ def index_google_doc(
 def search_memory(
     query: str,
     top_k: int = 3,
+    project: str = "",
 ) -> str:
     """
-    Semantically search long-term project memory.
+    Search semantic memory for relevant chunks.
 
-    Returns the most relevant chunks based on embedding similarity.
+    Optionally filter retrieval to a specific project before
+    semantic similarity ranking.
     """
 
     if not retriever.vector_db:
@@ -145,7 +147,17 @@ def search_memory(
     results = retriever.retrieve(
         query=query,
         top_k=top_k,
+        project=project or None,
     )
+
+    if not results:
+        if project:
+            return (
+                f"No information for project '{project}' "
+                f"was found in semantic memory."
+            )
+
+        return "No relevant information was found in semantic memory."
 
     return json.dumps(
         format_search_results(results),

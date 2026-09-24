@@ -14,9 +14,10 @@ creating a separate project.
 
 ## Current Architecture
 
-As of Module 2, My AI Brain runs a local LLM that can reason about a user's
-request, discover available tools through MCP, call those tools when external
-information is needed, and maintain short-term conversational context.
+As of Module 3, My AI Brain combines a local LLM, MCP-based tools,
+short-term conversational memory, external Google Docs integration, and
+semantic long-term memory through a Retrieval-Augmented Generation (RAG)
+pipeline.
 
 ```text
                          ┌──────────────────────┐
@@ -26,7 +27,7 @@ information is needed, and maintain short-term conversational context.
                                     ▼
                          ┌──────────────────────┐
                          │       Agent          │
-                         │   (ReAct-style loop) │
+                         │   ReAct-style loop   │
                          └──────────┬───────────┘
                                     │
                                     ▼
@@ -35,44 +36,66 @@ information is needed, and maintain short-term conversational context.
                          │ Qwen3-8B             │
                          └──────────┬───────────┘
                                     │
-                         Need external context?
-                           │                │
-                          Yes               No
-                           │                │
-                           ▼                ▼
-                    ┌─────────────┐      Answer
-                    │ MCP Tools   │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼─────────────┐
-              ▼            ▼             ▼
-        Local Project   Google Drive   Google Docs
-           Notes           Search         Reader
+                                    ▼
+                         ┌──────────────────────┐
+                         │      MCP Tools       │
+                         └──────────┬───────────┘
+                                    │
+                   ┌────────────────┼────────────────┐
+                   │                │                │
+                   ▼                ▼                ▼
+             Local Notes       Google APIs      Semantic Memory
+                                Drive + Docs      BGE Embeddings
 ```
 
-The LLM does not directly access Google APIs. It selects an MCP tool, the
-application executes that tool, and the resulting observation is returned to
-the LLM so it can continue reasoning.
+For work-information questions, the agent searches semantic memory first.
 
-This allows a single request to involve multiple tool calls.
+When the user identifies a project, project metadata can be used to filter
+candidate chunks before semantic similarity ranking.
 
-For example:
+If the requested project has not yet been indexed, the application can
+discover the corresponding Google Doc, index it into semantic memory, and
+retry retrieval.
 
 ```text
-"Find the Google Doc for Atlas and tell me what I should
- discuss with the architect."
-
-        ↓
-search_google_docs("Atlas")
-        ↓
-Google Drive returns document metadata + document ID
-        ↓
-read_google_doc(document_id)
-        ↓
-Google Docs returns document contents
-        ↓
-Qwen3-8B generates an answer grounded in the retrieved document
+User Question
+     ↓
+search_memory
+     ↓
+Project Metadata Filter
+     ↓
+Semantic Retrieval
+     │
+     ├── Relevant evidence found
+     │          ↓
+     │      Local LLM
+     │          ↓
+     │    Grounded Answer
+     │
+     └── Project not in memory
+                ↓
+         Google Docs Search
+                ↓
+         Document Discovery
+                ↓
+        Chunk + Embed + Index
+                ↓
+          Semantic Memory
+                ↓
+         search_memory again
+                ↓
+            Local LLM
+                ↓
+         Grounded Answer
 ```
+
+The LLM does not directly access Google APIs or the vector memory
+implementation. These capabilities are exposed through MCP tools.
+
+The application controller also handles deterministic workflow steps such as
+automatically indexing a discovered Google Doc. This keeps the LLM focused on
+deciding what information is needed while predictable ingestion operations
+remain application-controlled.
 
 ---
 
@@ -109,8 +132,8 @@ Response
 Qwen3-0.6B was tested with both standard generation and thinking mode.
 
 For simple project questions, thinking mode produced additional reasoning but
-did not materially improve the answers, so standard generation was used as the
-baseline.
+did not materially improve the answers, so standard generation was used as
+the baseline.
 
 This version intentionally had no external tools, semantic retrieval,
 persistent memory, or multi-agent workflow.
@@ -119,9 +142,9 @@ persistent memory, or multi-agent workflow.
 
 ## Module 2 - Agent Architecture, Memory, and MCP Tools
 
-Module 2 extends the baseline into a tool-using agent.
+Module 2 extended the baseline into a tool-using agent.
 
-The implementation focuses on three concepts from the module:
+The implementation focused on three concepts from the module:
 
 1. ReAct-style reasoning and action
 2. Short-term conversational memory
@@ -156,18 +179,20 @@ The agent does not maintain a hardcoded list of tool schemas in its controller.
 At runtime, it asks the MCP server for the available tools and provides their
 names, descriptions, and input schemas to the LLM.
 
-Current MCP tools include:
+Module 2 initially introduced:
 
 - `read_project_notes`
 - `search_google_docs`
 - `read_google_doc`
+
+Additional semantic-memory tools were added in Module 3.
 
 This separates the agent's reasoning loop from the implementation of individual
 tools.
 
 ### Google Integration
 
-Module 2 introduces the first real external data source.
+Module 2 introduced the first real external data source.
 
 Google Drive is used to discover documents and Google Docs is used to retrieve
 their contents.
@@ -182,18 +207,19 @@ MCP
 
 OAuth is used for authentication.
 
-The application requests read-only access:
+The application requests read-only access to:
 
-- Google Docs read-only
-- Google Drive read-only
+- Google Docs
+- Google Drive
 
-OAuth credentials and user tokens are stored locally and are excluded from Git.
+OAuth credentials and user tokens are stored locally and excluded from Git.
 
 ### Multi-Tool Reasoning
 
-The agent can chain tools when one tool's output is required by another.
+Module 2 demonstrated that the agent could chain tools when one tool's output
+was required by another.
 
-For example, the user does not need to know a Google document ID:
+For example:
 
 ```text
 User asks about Atlas
@@ -209,12 +235,16 @@ Docs returns document contents
 LLM answers using retrieved evidence
 ```
 
-This demonstrates the separation between:
+This demonstrated the separation between:
 
 - reasoning: deciding what information is needed
 - acting: selecting a tool
 - observation: receiving external information
 - answering: synthesizing the retrieved information
+
+Module 3 later evolved this flow so discovered documents can be indexed into
+semantic memory instead of requiring the entire document to be passed directly
+to the LLM for every question.
 
 ### Short-Term Memory
 
@@ -242,8 +272,280 @@ The second point was retry handling.
 The follow-up can be answered from conversation history without calling Google
 again.
 
-This is intentionally short-term memory only. Persistent long-term memory and
-semantic retrieval are not implemented yet.
+This provides short-term conversational memory. Module 3 adds a separate
+semantic-memory layer for longer-lived project knowledge.
+
+### Local Model Experiment
+
+The initial Qwen3-0.6B model could answer simple questions but was not reliable
+enough at following the structured MCP tool-calling protocol.
+
+The model was changed to:
+
+```text
+Qwen/Qwen3-8B
+```
+
+The larger model was substantially more reliable at selecting tools, supplying
+arguments, and continuing multi-step tool workflows.
+
+---
+
+## Module 3 - RAG and Semantic Memory
+
+Module 3 extends My AI Brain with Retrieval-Augmented Generation (RAG) and
+semantic long-term memory.
+
+The goal of this module is to establish a reliable:
+
+```text
+store → retrieve → answer
+```
+
+workflow before introducing more advanced retrieval strategies.
+
+### RAG Pipeline
+
+The core retrieval pipeline is:
+
+```text
+Project Information
+        ↓
+     Chunking
+        ↓
+    Embeddings
+        ↓
+ Semantic Memory
+
+
+User Question
+        ↓
+  Query Embedding
+        ↓
+Metadata Filtering
+        ↓
+ Semantic Search
+        ↓
+Top-K Relevant Chunks
+        ↓
+Retrieved Context
+        ↓
+    Qwen3-8B
+        ↓
+ Grounded Answer
+```
+
+The LLM therefore acts primarily as a synthesizer over retrieved project
+knowledge rather than being treated as the source of project memory.
+
+### Embeddings and Retrieval
+
+The project uses:
+
+```text
+BAAI/bge-small-en-v1.5
+```
+
+through Sentence Transformers to generate normalized embeddings.
+
+The query and stored chunks are embedded into the same vector space.
+Similarity is calculated using the dot product of normalized embeddings,
+which corresponds to cosine similarity.
+
+The initial retrieval configuration uses:
+
+```text
+top_k = 3
+```
+
+This intentionally keeps the retrieval strategy simple while the core RAG
+workflow is being established.
+
+### Chunking
+
+Documents are split into relatively small topical chunks before embedding.
+
+During testing, paragraph-level chunking produced overly fragmented Google Docs
+content. Increasing the chunk size too far produced a single large chunk.
+
+The current implementation groups related short paragraphs into larger
+semantic units while avoiding excessively large chunks.
+
+The current approximate chunk size is:
+
+```text
+250 characters
+```
+
+This is a simple initial strategy and can be refined later if retrieval
+evaluation shows that different chunk boundaries perform better.
+
+### Metadata-Aware Retrieval
+
+Each indexed chunk can carry metadata such as:
+
+- project
+- source
+- document ID
+- source type
+- modification time
+
+Metadata is stored alongside the text and embedding.
+
+When the user explicitly identifies a project, the retriever can filter
+candidate chunks by project before semantic similarity ranking.
+
+For example:
+
+```text
+Question:
+"What should I discuss with the architect about Atlas?"
+
+        ↓
+
+project = "Atlas"
+
+        ↓
+
+Filter semantic memory to Atlas
+
+        ↓
+
+Rank Atlas chunks by semantic similarity
+```
+
+This was added after testing showed an important limitation of similarity-only
+retrieval: an unrelated document could receive a similarity score very close
+to or even slightly above the correct project document.
+
+Project filtering reduces this type of cross-project retrieval error.
+
+### Google Docs → Semantic Memory
+
+Google Docs can now be:
+
+1. discovered through the Google Drive API,
+2. read through the Google Docs API,
+3. split into topical chunks,
+4. embedded,
+5. indexed into semantic memory,
+6. retrieved using semantic similarity.
+
+This connects the external knowledge source introduced in Module 2 to the RAG
+pipeline introduced in Module 3.
+
+### Controller-Managed Source Discovery
+
+The application uses the LLM for decisions that require interpretation, while
+the controller handles deterministic workflow transitions.
+
+For example, if the agent searches semantic memory for a named project and no
+information exists for that project:
+
+```text
+search_memory(project="Atlas")
+        ↓
+Memory Miss
+        ↓
+Controller
+        ↓
+search_google_docs("Atlas")
+        ↓
+Google Drive
+        ↓
+Matching document
+        ↓
+index_google_doc
+        ↓
+Semantic Memory
+        ↓
+search_memory(project="Atlas")
+```
+
+This behavior was introduced because the local LLM could correctly recognize
+that it needed to search Google Docs after a memory miss but did not always
+emit the required structured tool call.
+
+Moving this predictable transition into the controller makes the workflow more
+reliable without removing the LLM's responsibility for understanding the
+user's request.
+
+### MCP Semantic Memory Tools
+
+Module 3 adds two MCP tools:
+
+- `index_google_doc` — loads a Google Doc, chunks it, embeds the chunks, and
+  stores them in semantic memory.
+- `search_memory` — performs semantic top-k retrieval over indexed knowledge
+  and optionally filters retrieval by project.
+
+The MCP server now exposes:
+
+- `read_project_notes`
+- `search_google_docs`
+- `read_google_doc`
+- `index_google_doc`
+- `search_memory`
+
+This allows My AI Brain to access external source systems and semantic memory
+through the same MCP interface.
+
+### Module 3 End-to-End Example
+
+Given:
+
+```text
+What should I discuss with the architect about Atlas?
+```
+
+the agent can perform:
+
+```text
+search_memory(
+    query="what should I discuss with the architect?",
+    project="Atlas"
+)
+        ↓
+Atlas not currently indexed
+        ↓
+Controller searches Google Docs for "Atlas"
+        ↓
+Project Atlas - Architecture Notes
+        ↓
+Document is chunked and embedded
+        ↓
+Chunks stored with project="Atlas"
+        ↓
+search_memory(... project="Atlas")
+        ↓
+Relevant Atlas chunks retrieved
+        ↓
+Qwen3-8B
+        ↓
+Grounded answer
+```
+
+A second document was also tested in the same running session using a different
+topic. Project metadata kept retrieval scoped to the appropriate information
+instead of mixing unrelated chunks.
+
+### RAG Failure Analysis
+
+During development, retrieval scores were compared across relevant and
+irrelevant documents.
+
+The experiment showed that a single global cosine-similarity threshold would
+not reliably separate correct from incorrect evidence. In one test, an
+unrelated chunk received nearly the same score as the correct Atlas chunk.
+
+For this reason, the current design does not rely on an arbitrary global
+similarity cutoff.
+
+Instead, when the user provides an explicit project identifier, metadata
+filtering is applied before semantic ranking.
+
+This keeps the retrieval strategy simple while addressing the specific failure
+observed during testing.
 
 ---
 
@@ -258,7 +560,9 @@ my-ai-brain/
 │   ├── google_docs.py
 │   ├── llm.py
 │   ├── mcp_client.py
-│   └── mcp_server.py
+│   ├── mcp_server.py
+│   ├── rag.py
+│   └── retrieval.py
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -275,6 +579,7 @@ Responsibilities include:
 - discovering MCP tools
 - asking the LLM to choose between answering and tool use
 - executing requested tools
+- handling deterministic source-discovery transitions
 - feeding tool observations back to the model
 - bounding the tool-use loop
 
@@ -285,9 +590,28 @@ Local model interface.
 The current implementation uses Qwen3-8B through Hugging Face Transformers and
 PyTorch.
 
+### `src/retrieval.py`
+
+Semantic retrieval layer.
+
+Responsibilities include:
+
+- loading the embedding model
+- chunking text
+- generating normalized embeddings
+- storing chunks and metadata
+- filtering by project metadata
+- calculating semantic similarity
+- returning top-k relevant chunks
+
+### `src/rag.py`
+
+RAG orchestration layer for indexing sources, retrieving relevant context, and
+generating grounded answers.
+
 ### `src/mcp_server.py`
 
-MCP server exposing the tools available to the agent.
+MCP server exposing external-source and semantic-memory tools to the agent.
 
 ### `src/google_docs.py`
 
@@ -309,7 +633,9 @@ Synthetic project information used during development and for the local
 
 ## Running the Project
 
-Create and activate a Python virtual environment and install the dependencies:
+Create and activate a Python virtual environment.
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -334,43 +660,49 @@ after OAuth authorization.
 
 Both files are excluded from Git and must never be committed.
 
-Run the agent:
+Run the agent from the repository root:
 
 ```bash
-python src/agent.py
+python -m src.agent
 ```
 
 Example:
 
 ```text
-You: Find the Google Doc for Atlas and tell me what I should discuss
-with the architect.
+You: what should i discuss with architect about atlas?
 
-[Tool] search_google_docs
-[Tool] read_google_doc
+[Tool] search_memory
+[Controller] no memory for project 'Atlas', searching Google Docs
+[Controller] indexing Google Doc: Project Atlas - Architecture Notes
+[Tool] search_memory
 
-My AI Brain: ...
+My AI Brain: Based on the information retrieved...
 ```
 
 ---
 
 ## Current Limitations
 
-The Module 2 implementation is intentionally limited in scope.
+The current implementation is intentionally limited in scope.
 
-- Google Drive search currently searches document names rather than document
-  contents semantically.
-- Long-term memory is not yet implemented.
-- There is no vector database or RAG pipeline.
-- Retrieved information is not independently verified.
-- There is no multi-agent workflow.
-- Conflicting or outdated information is not yet detected automatically.
-- Google is currently the primary real external integration.
-- Tool routing depends on the local LLM correctly interpreting the available
-  MCP tool descriptions.
+- Semantic memory currently uses an in-memory vector store. Indexed embeddings
+  are lost when the MCP server exits.
+- Google Drive discovery currently searches document titles rather than
+  performing semantic search across Google Drive contents.
+- The current project/topic metadata is intentionally simple and is inferred
+  from the identifying term used during document discovery.
+- Chunking uses a simple size-based topical grouping strategy.
+- Retrieval does not yet include reranking, query rewriting, hybrid search, or
+  other advanced RAG techniques.
+- Retrieved information is not yet independently verified by a separate agent.
+- Conflicting or outdated information is not yet automatically resolved.
+- There is not yet a multi-agent workflow.
+- Google Docs is currently the primary real external knowledge integration.
+- Tool routing still depends partly on the local LLM correctly interpreting
+  available MCP tools.
 
-These limitations will be addressed selectively as later course modules
-introduce retrieval, multi-agent workflows, verification, and guardrails.
+These limitations are intentional. Later course modules will be evaluated
+individually and only the concepts that improve the core agent will be added.
 
 ---
 
@@ -383,75 +715,18 @@ adds only the concepts that improve the core goal of My AI Brain: reliably
 remembering and retrieving work context while keeping the architecture small
 enough to implement, understand, and evaluate.
 
-## Module 3 — RAG and Semantic Memory
+The project currently demonstrates the progression from:
 
-Module 3 extends My AI Brain with Retrieval-Augmented Generation (RAG) and semantic long-term memory.
+```text
+Module 1
+Local LLM
+    ↓
+Module 2
+Agent + MCP + Tools + Short-Term Memory
+    ↓
+Module 3
+RAG + Embeddings + Semantic Memory + Metadata-Aware Retrieval
+```
 
-### RAG Pipeline
-
-The current retrieval pipeline is:
-
-User Question
-→ Query Embedding
-→ Semantic Search
-→ Top-K Relevant Chunks
-→ Retrieved Context
-→ Qwen3-8B
-→ Grounded Answer
-
-### Embeddings and Retrieval
-
-The project uses `BAAI/bge-small-en-v1.5` through Sentence Transformers to generate normalized embeddings.
-
-Retrieved chunks are ranked using cosine similarity. The initial retrieval configuration uses `top_k=3`.
-
-### Chunking
-
-Documents are split into relatively small topical chunks before embedding.
-
-During testing, paragraph-level chunking produced overly fragmented Google Docs content. The chunking strategy was refined to group related short paragraphs into larger semantic units while avoiding excessively large chunks.
-
-### Metadata
-
-Each indexed chunk can carry metadata such as:
-
-- project
-- source
-- document ID
-- source type
-- modification time
-
-This provides the foundation for later handling of outdated or conflicting project information.
-
-### Google Docs → Semantic Memory
-
-Google Docs can now be:
-
-1. discovered through the Google Drive API,
-2. read through the Google Docs API,
-3. chunked and embedded,
-4. indexed into semantic memory,
-5. retrieved using semantic similarity.
-
-### MCP Semantic Memory Tools
-
-Module 3 adds two MCP tools:
-
-- `index_google_doc` — loads a Google Doc into semantic memory.
-- `search_memory` — performs semantic top-k retrieval over indexed project knowledge.
-
-The MCP server now exposes:
-
-- `read_project_notes`
-- `search_google_docs`
-- `read_google_doc`
-- `index_google_doc`
-- `search_memory`
-
-This allows My AI Brain to access both external source systems and semantic memory through the same MCP interface.
-
-### Current Limitation
-
-The vector store is currently in memory. Indexed embeddings are lost when the MCP server exits.
-
-Persistent vector storage is intentionally deferred to a later iteration so the current implementation remains focused on demonstrating the core RAG workflow.
+Future modules will extend this architecture only where the additional
+capability is justified by the problem being solved.
