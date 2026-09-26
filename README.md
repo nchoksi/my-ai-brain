@@ -730,3 +730,47 @@ RAG + Embeddings + Semantic Memory + Metadata-Aware Retrieval
 
 Future modules will extend this architecture only where the additional
 capability is justified by the problem being solved.
+
+
+## Module 4 — Agent Harness and Tree-of-Thought Reasoning
+
+Module 4 introduced the concept of an **Agent Harness**: the environment surrounding the language model that provides the context, tools, workflow, and evaluation expectations needed for an agent to operate reliably.
+
+The project already had many of these components implicitly through the MCP controller, semantic memory, Google Docs integration, and tool-calling workflow. In Module 4, these responsibilities were made more explicit.
+
+### Agent Harness
+
+An `AGENTS.md` file was introduced as the configuration and instruction layer for My AI Brain.
+
+The harness defines:
+
+- **Context** — the purpose and behavior of My AI Brain.
+- **Tools** — how MCP tools and connected sources should be used.
+- **Memory** — how short-term conversation memory and long-term semantic memory are used.
+- **Automation** — expected workflows such as memory → source discovery → indexing → retrieval.
+- **Constraints** — project facts should come from retrieved evidence rather than model assumptions.
+- **Evaluation** — expected behavior for grounded answers and insufficient evidence.
+
+`src/agent.py` loads `AGENTS.md` at runtime and includes it in the system context supplied to the local LLM.
+
+```text
+User
+  |
+  v
+Agent Controller
+  |
+  +---- AGENTS.md
+  |       |
+  |       +-- Context
+  |       +-- Tools
+  |       +-- Memory rules
+  |       +-- Workflow
+  |       +-- Constraints
+  |       +-- Evaluation expectations
+  |
+  +---- Local LLM
+  |
+  +---- MCP Tools
+           |
+           +-- Semantic Memory
+           +-- Google Docs

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -12,6 +13,20 @@ from src.llm import LocalLLM
 logging.getLogger("mcp").setLevel(logging.WARNING)
 logging.getLogger("googleapiclient").setLevel(logging.WARNING)
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+
+
+def load_agent_harness() -> str:
+    """
+    Load the Agent Harness instructions from AGENTS.md.
+    """
+    harness_path = Path(__file__).resolve().parent.parent / "AGENTS.md"
+
+    if not harness_path.exists():
+        raise FileNotFoundError(
+            f"Agent harness not found: {harness_path}"
+        )
+
+    return harness_path.read_text(encoding="utf-8")
 
 
 def parse_tool_request(response: str):
@@ -40,7 +55,6 @@ def parse_tool_request(response: str):
             except json.JSONDecodeError:
                 return None, None
 
-    # Some models may omit ARGS for tools with no arguments.
     if tool_name and arguments is None:
         arguments = {}
 
@@ -66,8 +80,9 @@ async def index_google_search_results(
     """
     Automatically index documents returned by search_google_docs.
 
-    The search keyword is also stored as project metadata so that
-    future retrieval can filter by project before semantic ranking.
+    If the Google search represents a known project, the project
+    name can be stored as metadata. Otherwise the document is still
+    indexed and remains available to semantic retrieval.
     """
     try:
         documents = json.loads(search_observation)
@@ -106,7 +121,7 @@ async def index_google_search_results(
             indexing_results.append(
                 {
                     "document": document_name,
-                    "project": project,
+                    "project": project or None,
                     "result": indexing_observation,
                 }
             )
@@ -115,7 +130,7 @@ async def index_google_search_results(
             indexing_results.append(
                 {
                     "document": document_name,
-                    "project": project,
+                    "project": project or None,
                     "result": f"Indexing failed: {exc}",
                 }
             )
@@ -132,7 +147,12 @@ async def index_google_search_results(
 async def build_system_prompt(session: ClientSession) -> str:
     """
     Discover MCP tools dynamically and build the system prompt.
+
+    AGENTS.md defines the Module 4 Agent Harness and is loaded
+    at runtime. MCP tools are discovered dynamically.
     """
+    agent_harness = load_agent_harness()
+
     tools_result = await session.list_tools()
 
     tool_descriptions = []
@@ -151,6 +171,14 @@ Input schema: {json.dumps(tool.inputSchema)}
     return f"""
 You are My AI Brain, a work assistant that helps users retrieve
 and reason over their work information.
+
+Follow the Agent Harness below.
+
+--- AGENT HARNESS ---
+
+{agent_harness}
+
+--- END AGENT HARNESS ---
 
 You have access to tools through MCP.
 
@@ -174,59 +202,42 @@ You may call multiple tools sequentially when necessary.
 
 SEMANTIC MEMORY WORKFLOW:
 
-For questions about work information:
+For questions about stored work information:
 
-1. Identify whether the user explicitly mentions a project, person,
-   or other clear identifying topic.
+1. Search semantic memory first using search_memory.
 
-2. Search semantic memory first using search_memory.
+2. Use semantic retrieval to find relevant information rather than
+   assuming that a person, keyword, or topic is a project.
 
-   If the user explicitly names a project, pass that project name
-   using the project argument.
+3. Use the project argument only when the user is clearly asking
+   about a project and the project identity is known.
 
-   Example:
+4. If the required information is not available in semantic memory,
+   use an appropriate connected source such as Google Docs to
+   discover the information.
 
-   User: "What should I discuss with the architect about Atlas?"
+5. search_google_docs searches document titles. Use a concise
+   identifying keyword likely to appear in the document title.
 
-   TOOL: search_memory
-   ARGS: {{"query": "what should I discuss with the architect?", "project": "Atlas", "top_k": 3}}
+6. Documents returned by search_google_docs are automatically
+   indexed into semantic memory by the controller.
 
-3. If search_memory reports that no information exists for that
-   project, the application controller may automatically search
-   Google Docs and index matching documents.
+7. After new information is indexed, search semantic memory again
+   before answering.
 
-4. search_google_docs searches DOCUMENT TITLES, not document
-   contents. Use a short identifying keyword likely to appear
-   in the document title.
-
-   Examples:
-
-   User: "What items are pending for Neil?"
-   Google Docs search query: "Neil"
-
-   User: "What architecture decisions were made for Atlas?"
-   Google Docs search query: "Atlas"
-
-   Do not send the entire user question to search_google_docs.
-
-5. Documents returned by search_google_docs are automatically
-   indexed into semantic memory by the application controller.
-
-6. After a document is indexed, call search_memory again.
-
-   If the document was discovered using a project identifier,
-   use that same identifier as the project filter.
-
-7. Answer using the evidence returned from semantic memory.
+8. Answer using the retrieved evidence.
 
 Use read_google_doc only when you specifically need the complete
 contents of a document.
 
 Use read_project_notes when the user's question is specifically
-about the local project notes.
+about local project notes.
 
 Do not invent document IDs, project information, source metadata,
 tool results, or facts that should come from a tool.
+
+Do not treat a person's name as a project merely because the name
+appears in the user's question.
 
 If retrieved evidence is insufficient, say that you do not have
 enough information.
@@ -273,12 +284,14 @@ async def run_agent(
         tool_name, arguments = parse_tool_request(response)
 
         if tool_name:
+            arguments = arguments or {}
+
             print(f"[Tool] {tool_name}")
 
             try:
                 result = await session.call_tool(
                     tool_name,
-                    arguments=arguments or {},
+                    arguments=arguments,
                 )
 
                 observation = extract_text_from_tool_result(result)
@@ -287,76 +300,147 @@ async def run_agent(
                 observation = f"Tool execution failed: {exc}"
 
             # --------------------------------------------------
-            # Controller-managed source discovery and ingestion
+            # Controller-managed source discovery
             # --------------------------------------------------
 
-            # If semantic memory has no information for a named
-            # project, automatically discover the corresponding
-            # Google Doc and index it.
             if (
                 tool_name == "search_memory"
-                and (arguments or {}).get("project")
                 and (
                     observation.startswith("Semantic memory is empty")
+                    or observation.startswith("No relevant information")
                     or observation.startswith("No information for project")
                 )
             ):
-                project = (arguments or {}).get("project")
+                project = arguments.get("project", "")
 
-                print(
-                    f"[Controller] no memory for project '{project}', "
-                    f"searching Google Docs"
-                )
+                # ----------------------------------------------
+                # Known project miss
+                # ----------------------------------------------
+                #
+                # If the model explicitly supplied a project,
+                # preserve that project through source discovery
+                # and indexing.
 
-                try:
-                    google_result = await session.call_tool(
-                        "search_google_docs",
-                        arguments={
-                            "query": project,
-                        },
+                if project:
+                    print(
+                        f"[Controller] no memory for project '{project}', "
+                        f"searching Google Docs"
                     )
 
-                    google_observation = extract_text_from_tool_result(
-                        google_result
+                    try:
+                        google_result = await session.call_tool(
+                            "search_google_docs",
+                            arguments={
+                                "query": project,
+                            },
+                        )
+
+                        google_observation = (
+                            extract_text_from_tool_result(
+                                google_result
+                            )
+                        )
+
+                        google_observation = (
+                            await index_google_search_results(
+                                session=session,
+                                search_observation=google_observation,
+                                project=project,
+                            )
+                        )
+
+                        observation = (
+                            f"{observation}\n\n"
+                            f"{google_observation}\n\n"
+                            f"If documents were discovered, search "
+                            f"semantic memory again before answering."
+                        )
+
+                    except Exception as exc:
+                        observation = (
+                            f"{observation}\n\n"
+                            f"Automatic Google Docs discovery failed: "
+                            f"{exc}"
+                        )
+
+                # ----------------------------------------------
+                # Generic semantic-memory miss
+                # ----------------------------------------------
+                #
+                # Do not guess that a person/topic is a project.
+                # Give control back to the LLM so it can choose
+                # an appropriate connected source and search term.
+
+                else:
+                    print(
+                        "[Controller] semantic memory miss; "
+                        "source discovery required"
                     )
 
-                    google_observation = await index_google_search_results(
-                        session=session,
-                        search_observation=google_observation,
-                        project=project,
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response,
+                        }
                     )
 
-                    observation = (
-                        f"{observation}\n\n"
-                        f"The controller searched Google Docs for project "
-                        f"'{project}'.\n\n"
-                        f"{google_observation}\n\n"
-                        f"The discovered project documents are now indexed. "
-                        f"Search semantic memory again using "
-                        f"project='{project}'."
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"""
+TOOL OBSERVATION:
+
+{observation}
+
+Semantic memory does not currently contain the information needed
+for this question:
+
+{user_question}
+
+Use the connected source tools to discover the missing information.
+
+For Google Docs, search_google_docs searches document titles, so
+choose a concise identifying keyword from the user's question that
+is likely to occur in the document title.
+
+Do not treat a person's name as a project.
+
+After finding a document, it will be indexed automatically.
+
+Then search semantic memory again before answering the original
+question.
+
+Do not answer from assumptions or previous unrelated context.
+""".strip(),
+                        }
                     )
 
-                except Exception as exc:
-                    observation = (
-                        f"{observation}\n\n"
-                        f"Automatic Google Docs discovery failed: {exc}"
-                    )
+                    continue
 
-            # If the LLM explicitly searches Google Docs,
-            # automatically index the discovered documents.
+            # --------------------------------------------------
+            # Generic Google Docs discovery
+            # --------------------------------------------------
+            #
+            # The LLM may search Google Docs for a person, topic,
+            # document name, or another identifier.
+            #
+            # These documents are indexed without pretending that
+            # the search keyword represents a project.
+
             elif (
                 tool_name == "search_google_docs"
-                and not observation.startswith("Tool execution failed:")
+                and not observation.startswith(
+                    "Tool execution failed:"
+                )
             ):
                 observation = await index_google_search_results(
                     session=session,
                     search_observation=observation,
-                    project=(arguments or {}).get("query", ""),
+                    project="",
                 )
 
             # --------------------------------------------------
-            # Feed the completed tool/controller observation
-            # back to the LLM.
+            # Feed completed tool observation back to the LLM
             # --------------------------------------------------
 
             messages.append(
@@ -380,11 +464,10 @@ Original question:
 
 Continue working on the original question.
 
-If documents were just indexed into semantic memory, use
-search_memory again before answering.
+Use retrieved evidence rather than assumptions.
 
-If the original question names a project, preserve that project
-filter when searching semantic memory again.
+If documents were just indexed into semantic memory, search
+semantic memory again before answering.
 
 If more information is required, call another appropriate tool.
 
@@ -399,7 +482,6 @@ tool call.
 
             continue
 
-        # No tool request means the model considers the task complete.
         if response.startswith("FINAL:"):
             return response.removeprefix("FINAL:").strip()
 
@@ -412,6 +494,11 @@ tool call.
 
 
 async def main():
+    # Fail early if the Module 4 Agent Harness is unavailable.
+    load_agent_harness()
+
+    print("[Harness] AGENTS.md loaded")
+
     llm = LocalLLM()
 
     server_params = StdioServerParameters(
@@ -446,7 +533,6 @@ async def main():
 
                 print(f"\nMy AI Brain: {answer}\n")
 
-                # Store interaction in short-term memory.
                 conversation_history.append(
                     {
                         "role": "user",
