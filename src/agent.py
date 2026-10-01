@@ -76,6 +76,26 @@ def extract_text_from_tool_result(result) -> str:
     )
 
 
+def normalize_project_name(project: str) -> str:
+    """
+    Normalize common project-name variants to one stable identity.
+
+    Examples:
+    - Project Atlas -> Atlas
+    - project-atlas -> Atlas
+    - Atlas -> Atlas
+    """
+
+    value = (project or "").strip()
+
+    if value.lower().startswith("project-"):
+        value = value[len("project-"):].strip()
+    elif value.lower().startswith("project "):
+        value = value[len("project "):].strip()
+
+    return value
+
+
 async def index_google_search_results(
     session: ClientSession,
     search_observation: str,
@@ -219,6 +239,102 @@ async def index_github_search_results(
     )
 
 
+async def index_slack_search_results(
+    session: ClientSession,
+    search_observation: str,
+    project: str = "",
+) -> str:
+    """Automatically index channels returned by search_slack_channels."""
+    try:
+        channels = json.loads(search_observation)
+    except json.JSONDecodeError:
+        return search_observation
+
+    if not isinstance(channels, list) or not channels:
+        return search_observation
+
+    indexing_results = []
+    for channel in channels:
+        channel_id = channel.get("id")
+        channel_name = channel.get("name", "")
+        if not channel_id:
+            continue
+        print(f"[Controller] indexing Slack channel: #{channel_name}")
+        try:
+            result = await session.call_tool(
+                "index_slack_channel",
+                arguments={
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "project": project,
+                },
+            )
+            indexing_observation = extract_text_from_tool_result(result)
+            indexing_results.append({
+                "channel": channel_name,
+                "project": project or None,
+                "result": indexing_observation,
+            })
+        except Exception as exc:
+            indexing_results.append({
+                "channel": channel_name,
+                "project": project or None,
+                "result": f"Indexing failed: {exc}",
+            })
+
+    return (
+        f"Slack channel search results:\n{search_observation}\n\n"
+        f"The controller automatically indexed the discovered Slack channels "
+        f"into semantic memory:\n{json.dumps(indexing_results, indent=2)}\n\n"
+        f"Search semantic memory again before answering."
+    )
+
+
+async def discover_project_sources(
+    session: ClientSession,
+    project: str,
+) -> str:
+    """
+    Discover and index connected sources containing general project
+    knowledge. Google Docs and Slack are checked because project facts
+    may span formal documentation and team discussion.
+    """
+
+    normalized_project = normalize_project_name(project)
+    observations = []
+
+    google_result = await session.call_tool(
+        "search_google_docs",
+        arguments={"query": normalized_project},
+    )
+    google_observation = extract_text_from_tool_result(google_result)
+    google_observation = await index_google_search_results(
+        session=session,
+        search_observation=google_observation,
+        project=normalized_project,
+    )
+    observations.append(google_observation)
+
+    slack_result = await session.call_tool(
+        "search_slack_channels",
+        arguments={"query": normalized_project},
+    )
+    slack_observation = extract_text_from_tool_result(slack_result)
+    slack_observation = await index_slack_search_results(
+        session=session,
+        search_observation=slack_observation,
+        project=normalized_project,
+    )
+    observations.append(slack_observation)
+
+    return (
+        f"Project source discovery completed for '{normalized_project}'.\n\n"
+        + "\n\n".join(observations)
+        + "\n\nSearch semantic memory again using "
+          f'project="{normalized_project}" before answering.'
+    )
+
+
 async def build_system_prompt(session: ClientSession) -> str:
     """
     Discover MCP tools dynamically and build the system prompt.
@@ -288,9 +404,22 @@ For questions about stored work information:
 3. Use the project argument only when the user is clearly asking
    about a project and the project identity is known.
 
+   Normalize common project-name variants to one stable identity.
+   For example, "Project Atlas", "project-atlas", and "Atlas" refer
+   to the same project and should use "Atlas" as semantic-memory
+   metadata.
+
 4. If the required information is not available in semantic memory,
    choose the appropriate connected source based on the information
    needed.
+
+   For a general project-knowledge question, relevant evidence may span
+   multiple connected sources. Google Docs and Slack should both be
+   considered before concluding that project evidence is unavailable.
+
+   Do not search GitHub merely because the user asks for all work
+   sources. Search GitHub only when source-code information is relevant
+   and a repository mapping is known.
 
 5. Use Google Docs for project notes, meeting notes, architecture
    documents, decisions, and other written documentation.
@@ -305,7 +434,7 @@ For questions about stored work information:
    Documents returned by search_google_docs are automatically
    indexed into semantic memory by the controller.
 
-8. GitHub discovery searches file paths and file names, not the
+9. GitHub discovery searches file paths and file names, not the
    contents of source-code files.
 
    When calling search_github_files, use a concise file, class, or
@@ -321,10 +450,10 @@ For questions about stored work information:
    Files returned by search_github_files are automatically indexed
    into semantic memory by the controller.
 
-9. After new information from any source is indexed, search semantic
+11. After new information from any source is indexed, search semantic
    memory again before answering.
 
-10. Answer using the retrieved evidence.
+12. Answer using the retrieved evidence.
 
 Use read_google_doc only when you specifically need the complete
 contents of a document.
@@ -389,6 +518,11 @@ async def run_agent(
         if tool_name:
             arguments = arguments or {}
 
+            if tool_name == "search_memory" and arguments.get("project"):
+                arguments["project"] = normalize_project_name(
+                    arguments["project"]
+                )
+
             print(f"[Tool] {tool_name}")
 
             try:
@@ -419,18 +553,63 @@ async def run_agent(
                     or observation.startswith("No information for project")
                 )
             ):
-                project = arguments.get("project", "")
+                project = normalize_project_name(
+                    arguments.get("project", "")
+                )
 
                 if project:
                     print(
                         f"[Controller] no memory for project '{project}'; "
-                        "source discovery required"
+                        "discovering project sources"
                     )
-                else:
-                    print(
-                        "[Controller] semantic memory miss; "
-                        "source discovery required"
+
+                    try:
+                        observation = await discover_project_sources(
+                            session=session,
+                            project=project,
+                        )
+                    except Exception as exc:
+                        observation = (
+                            f"Project source discovery failed: {exc}"
+                        )
+
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response,
+                        }
                     )
+
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"""
+TOOL OBSERVATION:
+
+{observation}
+
+Original question:
+
+{user_question}
+
+The controller searched the connected project-knowledge sources
+(Google Docs and Slack) and indexed any discovered information.
+
+Now search semantic memory again using project="{project}" before
+answering.
+
+Do not answer from assumptions or conversational memory when project
+facts should come from retrieved evidence.
+""".strip(),
+                        }
+                    )
+
+                    continue
+
+                print(
+                    "[Controller] semantic memory miss; "
+                    "source discovery required"
+                )
 
                 messages.append(
                     {
@@ -456,31 +635,16 @@ Use the connected source tools to discover the missing information.
 
 Choose the source based on the information needed:
 
-- Use Google Docs for project notes, meeting notes, architecture
-  documents, decisions, and other written documentation.
+- Use Google Docs for documents, meeting notes, architecture,
+  decisions, and other written documentation.
 
-- Use GitHub for source code, implementation details, classes,
-  methods, tests, repository structure, and questions about how
-  software behaves.
+- Use GitHub for source code and implementation details when a
+  repository mapping is known.
 
-For Google Docs, search_google_docs searches document titles.
-Use a concise identifying keyword likely to occur in the title.
+- Use Slack for team discussions, updates, follow-ups, and channel
+  decisions.
 
-For GitHub, search_github_files searches file paths and file names,
-not source-code contents.
-
-Use a concise file, class, or topic identifier likely to occur in a
-file path. For example, use "Joke" or "RandomJokes" rather than
-"fetch parse" when searching the jokesAPI repository.
-
-Use the repository mapping from the Agent Harness. Do not invent
-repository names or file paths.
-
-Search results from Google Docs and GitHub will be automatically
-indexed into semantic memory by the controller.
-
-After relevant information is indexed, search semantic memory again
-before answering.
+After relevant information is indexed, search semantic memory again.
 
 Do not answer from assumptions or unrelated conversational context.
 """.strip(),
@@ -503,7 +667,9 @@ Do not answer from assumptions or unrelated conversational context.
                     "Tool execution failed:"
                 )
             ):
-                project = arguments.get("project", "")
+                project = normalize_project_name(
+                    arguments.get("project", "")
+                )
 
                 observation = await index_google_search_results(
                     session=session,
@@ -535,6 +701,22 @@ Do not answer from assumptions or unrelated conversational context.
                         repository=repository,
                         project=project,
                     )
+
+            # --------------------------------------------------
+            # Slack discovery
+            # --------------------------------------------------
+
+            elif (
+                tool_name == "search_slack_channels"
+                and not observation.startswith("Tool execution failed:")
+            ):
+                query = arguments.get("query", "")
+                project = normalize_project_name(query)
+                observation = await index_slack_search_results(
+                    session=session,
+                    search_observation=observation,
+                    project=project,
+                )
 
             # --------------------------------------------------
             # Feed completed tool observation back to the LLM

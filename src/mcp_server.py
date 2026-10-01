@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-from src.github_source import read_github_file as github_read_file
 from src.github_source import (
     read_github_file as github_read_file,
     search_github_files as github_search_files,
@@ -12,6 +11,10 @@ from src.google_docs import (
     search_google_docs as google_search_documents,
 )
 from src.retrieval import Retriever
+from src.slack_source import (
+    read_slack_channel as slack_read_channel,
+    search_slack_channels as slack_search_channels,
+)
 
 
 mcp = FastMCP("my-ai-brain")
@@ -23,6 +26,7 @@ mcp = FastMCP("my-ai-brain")
 retriever = Retriever()
 indexed_google_docs = set()
 indexed_github_files = set()
+indexed_slack_channels = set()
 
 def format_search_results(results):
     """
@@ -226,6 +230,55 @@ def search_github_files(repository: str, query: str) -> str:
         return "No matching GitHub files found."
 
     return json.dumps(results, indent=2)
+
+
+# -------------------------------------------------------------------
+# Slack tools
+# -------------------------------------------------------------------
+
+@mcp.tool()
+def search_slack_channels(query: str) -> str:
+    """Search visible Slack channels by channel name."""
+    results = slack_search_channels(query)
+    if not results:
+        return "No matching Slack channels found."
+    return json.dumps(results, indent=2)
+
+
+@mcp.tool()
+def read_slack_channel(channel_id: str, limit: int = 100) -> str:
+    """Read recent messages from a Slack channel."""
+    return json.dumps(slack_read_channel(channel_id, limit=limit), indent=2)
+
+
+@mcp.tool()
+def index_slack_channel(
+    channel_id: str,
+    channel_name: str = "",
+    project: str = "",
+    limit: int = 100,
+) -> str:
+    """Read a Slack channel and index its messages into semantic memory."""
+    if channel_id in indexed_slack_channels:
+        return "Slack channel is already indexed in semantic memory."
+
+    channel = slack_read_channel(channel_id, limit=limit)
+    messages = channel.get("messages", [])
+    if not messages:
+        return "No readable Slack messages were found in the channel."
+
+    text = "\n\n".join(message["text"] for message in messages if message.get("text"))
+    metadata = {
+        "project": project or None,
+        "source": f"#{channel_name}" if channel_name else channel_id,
+        "channel_id": channel_id,
+        "channel_name": channel_name or None,
+        "source_type": "slack",
+    }
+    count = retriever.index_text(text=text, metadata=metadata)
+    indexed_slack_channels.add(channel_id)
+    return f"Indexed {count} chunks from Slack channel {channel_name or channel_id} into semantic memory."
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

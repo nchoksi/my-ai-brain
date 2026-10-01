@@ -25,6 +25,9 @@ Current capabilities include:
 - searching GitHub repositories for relevant files
 - reading GitHub files
 - indexing GitHub files into semantic memory
+- searching Slack channels
+- reading Slack channel history
+- indexing Slack channels into semantic memory
 - searching semantic memory
 
 For questions about stored work information, search semantic memory
@@ -33,8 +36,23 @@ before answering.
 When the user explicitly identifies a project, use that project as
 metadata when searching semantic memory.
 
+Normalize common forms of the same project to one stable project identity.
+For example, `Project Atlas`, `project-atlas`, and `Atlas` all refer to
+the project `Atlas`. Use the normalized identity consistently when
+indexing and searching semantic memory.
+
 If semantic memory does not contain enough information, select the
 connected source based on the type of information needed.
+
+For general project-knowledge questions, relevant evidence may span
+multiple connected sources. When the project is known and semantic
+memory does not yet contain its information, consider both Google Docs
+and Slack because formal project documentation and team discussions may
+contain complementary evidence.
+
+Do not search GitHub merely because the user asks for information across
+all work sources. Use GitHub when source-code or implementation evidence
+is relevant and a repository mapping for that project is known.
 
 Use Google Docs for information likely to exist in documents, such as:
 - project notes
@@ -49,6 +67,17 @@ Use GitHub for information likely to exist in source code, such as:
 - tests
 - repository structure
 - how an application behaves
+
+Use Slack for information likely to exist in team conversations, such as:
+- project discussions
+- follow-up items
+- conversational updates
+- decisions discussed in channels
+
+Slack discovery searches channel names. Use a concise project or channel
+identifier likely to occur in the channel name. Channels discovered through
+search_slack_channels are automatically indexed into semantic memory by the
+application controller.
 
 Google Docs discovery searches document titles. Use a concise
 identifying term such as the project or topic name rather than the
@@ -87,6 +116,10 @@ Google Docs:
 GitHub repositories:
 - jokesAPI: `nchoksi/jokesAPI`
 
+Slack:
+- Connected through the configured Slack workspace.
+- Project Atlas test channel: `project-atlas`
+
 
 ## Automation
 
@@ -95,14 +128,19 @@ The application controller handles deterministic workflow steps.
 Current controller-managed automation:
 
 1. The agent searches semantic memory for relevant stored information.
-2. If semantic memory does not contain enough information, the agent
-   selects an appropriate connected source.
-3. Google Docs search results are automatically indexed into semantic
+2. Known project names are normalized to a stable project identity before
+   semantic-memory filtering or indexing.
+3. If a general project question misses semantic memory, the controller
+   discovers relevant project knowledge from Google Docs and Slack so
+   complementary documentation and discussion can be indexed together.
+4. Google Docs search results are automatically indexed into semantic
    memory.
-4. GitHub file search results are automatically indexed into semantic
+5. Slack channel search results are automatically indexed into semantic
    memory.
-5. The agent searches semantic memory again after indexing.
-6. The final answer is generated from retrieved evidence.
+6. GitHub file search results are automatically indexed when source-code
+   information is relevant and a repository mapping is known.
+7. The agent searches semantic memory again after indexing.
+8. The final answer is generated from retrieved evidence.
 
 The LLM decides which source and search term are appropriate, while
 predictable indexing operations remain application-controlled.
