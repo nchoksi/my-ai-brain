@@ -2,7 +2,11 @@ import json
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-
+from src.github_source import read_github_file as github_read_file
+from src.github_source import (
+    read_github_file as github_read_file,
+    search_github_files as github_search_files,
+)
 from src.google_docs import (
     read_google_doc as google_read_document,
     search_google_docs as google_search_documents,
@@ -18,7 +22,7 @@ mcp = FastMCP("my-ai-brain")
 
 retriever = Retriever()
 indexed_google_docs = set()
-
+indexed_github_files = set()
 
 def format_search_results(results):
     """
@@ -163,7 +167,65 @@ def search_memory(
         format_search_results(results),
         indent=2,
     )
+@mcp.tool()
+def read_github_file(repository: str, path: str) -> dict:
+    """Read a file from a GitHub repository."""
+    
+    return github_read_file(repository, path)
+@mcp.tool()
+def index_github_file(
+    repository: str,
+    path: str,
+    project: str = "",
+) -> str:
+    """
+    Add a GitHub source file to semantic memory.
 
+    The file is read from GitHub, chunked, embedded,
+    and stored in the shared semantic memory.
+    """
+
+    file_key = f"{repository}:{path}"
+
+    if file_key in indexed_github_files:
+        return "GitHub file is already indexed in semantic memory."
+
+    github_file = github_read_file(repository, path)
+
+    metadata = {
+        "project": project or None,
+        "source": f"{repository}/{path}",
+        "repository": repository,
+        "path": path,
+        "sha": github_file["sha"],
+        "url": github_file["url"],
+        "source_type": "github",
+    }
+
+    count = retriever.index_text(
+        text=github_file["content"],
+        metadata=metadata,
+    )
+
+    indexed_github_files.add(file_key)
+
+    return (
+        f"Indexed {count} chunks from "
+        f"{repository}/{path} into semantic memory."
+    )
+
+@mcp.tool()
+def search_github_files(repository: str, query: str) -> str:
+    """
+    Search a GitHub repository for files whose paths match the query.
+    """
+
+    results = github_search_files(repository, query)
+
+    if not results:
+        return "No matching GitHub files found."
+
+    return json.dumps(results, indent=2)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

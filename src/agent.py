@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def load_agent_harness() -> str:
     """
     Load the Agent Harness instructions from AGENTS.md.
     """
+
     harness_path = Path(__file__).resolve().parent.parent / "AGENTS.md"
 
     if not harness_path.exists():
@@ -38,6 +40,7 @@ def parse_tool_request(response: str):
     TOOL: <tool name>
     ARGS: <valid JSON object>
     """
+
     tool_name = None
     arguments = None
 
@@ -65,6 +68,7 @@ def extract_text_from_tool_result(result) -> str:
     """
     Extract text returned by an MCP tool.
     """
+
     return "\n".join(
         content.text
         for content in result.content
@@ -79,11 +83,8 @@ async def index_google_search_results(
 ) -> str:
     """
     Automatically index documents returned by search_google_docs.
-
-    If the Google search represents a known project, the project
-    name can be stored as metadata. Otherwise the document is still
-    indexed and remains available to semantic retrieval.
     """
+
     try:
         documents = json.loads(search_observation)
     except json.JSONDecodeError:
@@ -140,7 +141,81 @@ async def index_google_search_results(
         f"{search_observation}\n\n"
         f"The controller automatically indexed the discovered "
         f"documents into semantic memory:\n"
-        f"{json.dumps(indexing_results, indent=2)}"
+        f"{json.dumps(indexing_results, indent=2)}\n\n"
+        f"Search semantic memory again before answering."
+    )
+
+
+async def index_github_search_results(
+    session: ClientSession,
+    search_observation: str,
+    repository: str,
+    project: str = "",
+) -> str:
+    """
+    Automatically index files returned by search_github_files.
+
+    GitHub search discovers candidate source files. The controller
+    indexes those files into semantic memory so the agent can
+    retrieve their contents semantically on the next step.
+    """
+
+    try:
+        files = json.loads(search_observation)
+    except json.JSONDecodeError:
+        return search_observation
+
+    if not isinstance(files, list) or not files:
+        return search_observation
+
+    indexing_results = []
+
+    for file in files:
+        path = file.get("path")
+
+        if not path:
+            continue
+
+        print(f"[Controller] indexing GitHub file: {path}")
+
+        try:
+            result = await session.call_tool(
+                "index_github_file",
+                arguments={
+                    "repository": repository,
+                    "path": path,
+                    "project": project,
+                },
+            )
+
+            indexing_observation = extract_text_from_tool_result(result)
+
+            indexing_results.append(
+                {
+                    "repository": repository,
+                    "path": path,
+                    "project": project or None,
+                    "result": indexing_observation,
+                }
+            )
+
+        except Exception as exc:
+            indexing_results.append(
+                {
+                    "repository": repository,
+                    "path": path,
+                    "project": project or None,
+                    "result": f"Indexing failed: {exc}",
+                }
+            )
+
+    return (
+        f"GitHub search results:\n"
+        f"{search_observation}\n\n"
+        f"The controller automatically indexed the discovered "
+        f"GitHub files into semantic memory:\n"
+        f"{json.dumps(indexing_results, indent=2)}\n\n"
+        f"Search semantic memory again before answering."
     )
 
 
@@ -151,6 +226,7 @@ async def build_system_prompt(session: ClientSession) -> str:
     AGENTS.md defines the Module 4 Agent Harness and is loaded
     at runtime. MCP tools are discovered dynamically.
     """
+
     agent_harness = load_agent_harness()
 
     tools_result = await session.list_tools()
@@ -213,28 +289,54 @@ For questions about stored work information:
    about a project and the project identity is known.
 
 4. If the required information is not available in semantic memory,
-   use an appropriate connected source such as Google Docs to
-   discover the information.
+   choose the appropriate connected source based on the information
+   needed.
 
-5. search_google_docs searches document titles. Use a concise
-   identifying keyword likely to appear in the document title.
+5. Use Google Docs for project notes, meeting notes, architecture
+   documents, decisions, and other written documentation.
 
-6. Documents returned by search_google_docs are automatically
+6. Use GitHub for source code, implementation details, classes,
+   methods, tests, repository structure, and questions about how
+   software behaves.
+
+7. Google Docs discovery searches document titles. Use a concise
+   identifying keyword likely to occur in the title.
+
+   Documents returned by search_google_docs are automatically
    indexed into semantic memory by the controller.
 
-7. After new information is indexed, search semantic memory again
-   before answering.
+8. GitHub discovery searches file paths and file names, not the
+   contents of source-code files.
 
-8. Answer using the retrieved evidence.
+   When calling search_github_files, use a concise file, class, or
+   topic identifier likely to occur in a path.
+
+   For example, for a question about how jokes are fetched, search
+   for "Joke" or "RandomJokes" rather than phrases such as
+   "fetch parse".
+
+   Use the repository mapping in the Agent Harness. Do not invent
+   repository names or file paths.
+
+   Files returned by search_github_files are automatically indexed
+   into semantic memory by the controller.
+
+9. After new information from any source is indexed, search semantic
+   memory again before answering.
+
+10. Answer using the retrieved evidence.
 
 Use read_google_doc only when you specifically need the complete
 contents of a document.
 
+Use read_github_file only when you specifically need the complete
+contents of a source file.
+
 Use read_project_notes when the user's question is specifically
 about local project notes.
 
-Do not invent document IDs, project information, source metadata,
-tool results, or facts that should come from a tool.
+Do not invent document IDs, repository paths, project information,
+source metadata, tool results, or facts that should come from a tool.
 
 Do not treat a person's name as a project merely because the name
 appears in the user's question.
@@ -258,6 +360,7 @@ async def run_agent(
     """
     Run one user turn through a bounded reasoning/tool loop.
     """
+
     system_prompt = await build_system_prompt(session)
 
     messages = [
@@ -300,8 +403,13 @@ async def run_agent(
                 observation = f"Tool execution failed: {exc}"
 
             # --------------------------------------------------
-            # Controller-managed source discovery
+            # Semantic-memory miss
             # --------------------------------------------------
+            #
+            # A memory miss does not determine which external
+            # source contains the answer. Give control back to
+            # the LLM so it can select Google Docs, GitHub, or
+            # another connected source based on the question.
 
             if (
                 tool_name == "search_memory"
@@ -313,81 +421,28 @@ async def run_agent(
             ):
                 project = arguments.get("project", "")
 
-                # ----------------------------------------------
-                # Known project miss
-                # ----------------------------------------------
-                #
-                # If the model explicitly supplied a project,
-                # preserve that project through source discovery
-                # and indexing.
-
                 if project:
                     print(
-                        f"[Controller] no memory for project '{project}', "
-                        f"searching Google Docs"
+                        f"[Controller] no memory for project '{project}'; "
+                        "source discovery required"
                     )
-
-                    try:
-                        google_result = await session.call_tool(
-                            "search_google_docs",
-                            arguments={
-                                "query": project,
-                            },
-                        )
-
-                        google_observation = (
-                            extract_text_from_tool_result(
-                                google_result
-                            )
-                        )
-
-                        google_observation = (
-                            await index_google_search_results(
-                                session=session,
-                                search_observation=google_observation,
-                                project=project,
-                            )
-                        )
-
-                        observation = (
-                            f"{observation}\n\n"
-                            f"{google_observation}\n\n"
-                            f"If documents were discovered, search "
-                            f"semantic memory again before answering."
-                        )
-
-                    except Exception as exc:
-                        observation = (
-                            f"{observation}\n\n"
-                            f"Automatic Google Docs discovery failed: "
-                            f"{exc}"
-                        )
-
-                # ----------------------------------------------
-                # Generic semantic-memory miss
-                # ----------------------------------------------
-                #
-                # Do not guess that a person/topic is a project.
-                # Give control back to the LLM so it can choose
-                # an appropriate connected source and search term.
-
                 else:
                     print(
                         "[Controller] semantic memory miss; "
                         "source discovery required"
                     )
 
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response,
-                        }
-                    )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": response,
+                    }
+                )
 
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"""
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"""
 TOOL OBSERVATION:
 
 {observation}
@@ -399,33 +454,48 @@ for this question:
 
 Use the connected source tools to discover the missing information.
 
-For Google Docs, search_google_docs searches document titles, so
-choose a concise identifying keyword from the user's question that
-is likely to occur in the document title.
+Choose the source based on the information needed:
 
-Do not treat a person's name as a project.
+- Use Google Docs for project notes, meeting notes, architecture
+  documents, decisions, and other written documentation.
 
-After finding a document, it will be indexed automatically.
+- Use GitHub for source code, implementation details, classes,
+  methods, tests, repository structure, and questions about how
+  software behaves.
 
-Then search semantic memory again before answering the original
-question.
+For Google Docs, search_google_docs searches document titles.
+Use a concise identifying keyword likely to occur in the title.
 
-Do not answer from assumptions or previous unrelated context.
+For GitHub, search_github_files searches file paths and file names,
+not source-code contents.
+
+Use a concise file, class, or topic identifier likely to occur in a
+file path. For example, use "Joke" or "RandomJokes" rather than
+"fetch parse" when searching the jokesAPI repository.
+
+Use the repository mapping from the Agent Harness. Do not invent
+repository names or file paths.
+
+Search results from Google Docs and GitHub will be automatically
+indexed into semantic memory by the controller.
+
+After relevant information is indexed, search semantic memory again
+before answering.
+
+Do not answer from assumptions or unrelated conversational context.
 """.strip(),
-                        }
-                    )
+                    }
+                )
 
-                    continue
+                continue
 
             # --------------------------------------------------
-            # Generic Google Docs discovery
+            # Google Docs discovery
             # --------------------------------------------------
             #
-            # The LLM may search Google Docs for a person, topic,
-            # document name, or another identifier.
-            #
-            # These documents are indexed without pretending that
-            # the search keyword represents a project.
+            # Google search results are automatically indexed so
+            # the LLM does not need to orchestrate the mechanical
+            # indexing step.
 
             elif (
                 tool_name == "search_google_docs"
@@ -433,11 +503,38 @@ Do not answer from assumptions or previous unrelated context.
                     "Tool execution failed:"
                 )
             ):
+                project = arguments.get("project", "")
+
                 observation = await index_google_search_results(
                     session=session,
                     search_observation=observation,
-                    project="",
+                    project=project,
                 )
+
+            # --------------------------------------------------
+            # GitHub discovery
+            # --------------------------------------------------
+            #
+            # GitHub path-search results are automatically indexed
+            # into the same semantic memory used by other sources.
+
+            elif (
+                tool_name == "search_github_files"
+                and not observation.startswith(
+                    "Tool execution failed:"
+                )
+            ):
+                repository = arguments.get("repository", "")
+
+                if repository:
+                    project = repository.split("/")[-1]
+
+                    observation = await index_github_search_results(
+                        session=session,
+                        search_observation=observation,
+                        repository=repository,
+                        project=project,
+                    )
 
             # --------------------------------------------------
             # Feed completed tool observation back to the LLM
@@ -466,13 +563,16 @@ Continue working on the original question.
 
 Use retrieved evidence rather than assumptions.
 
-If documents were just indexed into semantic memory, search
+If information was just indexed into semantic memory, search
 semantic memory again before answering.
 
 If more information is required, call another appropriate tool.
 
 If you have sufficient retrieved evidence, provide the final
 answer normally.
+
+Do not merely describe a tool call you intend to make. If another
+tool is required, actually issue the TOOL and ARGS request.
 
 Do not output TOOL or ARGS unless you actually want another
 tool call.
@@ -504,6 +604,7 @@ async def main():
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "src.mcp_server"],
+        env=os.environ.copy(),
     )
 
     conversation_history = []
