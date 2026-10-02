@@ -899,3 +899,33 @@ Google Docs + GitHub + Slack + Cross-Source Retrieval
 Tree-of-Thought reasoning was evaluated during Module 4 but intentionally excluded from the core workflow.
 
 The next course module will be evaluated against the same principle: add architecture only where it solves a demonstrated problem in My AI Brain.
+
+---
+
+## Module 5 — Multi-Agent Verification with LangGraph
+
+Module 5 extends My AI Brain with a small multi-agent workflow focused on improving the reliability of generated answers.
+
+The architecture intentionally uses two agent roles:
+
+1. **Retrieval + Answer Agent** — reuses the existing retrieval workflow to search semantic memory and connected sources, collect relevant evidence, and generate a grounded draft answer.
+2. **Verifier Agent** — independently checks whether the draft answer is supported by the retrieved evidence.
+
+LangGraph coordinates the workflow using shared state and conditional routing.
+
+```text
+User Question
+      ↓
+Retrieval + Answer Agent
+      ↓
+Retrieved Evidence + Draft Answer
+      ↓
+Verifier Agent
+   /       \
+ PASS      RETRY
+  ↓          ↓
+ END    Verifier Feedback
+             ↓
+       Retrieval + Answer Agent
+             ↓
+          Verifier

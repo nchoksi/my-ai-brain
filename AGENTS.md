@@ -176,3 +176,22 @@ Tree-of-Thought may be considered later for tasks that genuinely
 require exploring competing solution paths, strategic planning,
 backtracking, or comparing architecture alternatives under several
 constraints.
+
+## Multi-Agent Verification
+
+My AI Brain uses two agent roles:
+
+1. **Retrieval + Answer Agent**
+   - Retrieves relevant evidence from semantic memory and connected sources.
+   - Generates a draft answer grounded in the retrieved evidence.
+
+2. **Verifier Agent**
+   - Receives the original question, retrieved evidence, and draft answer.
+   - Checks whether factual claims in the draft are supported by the evidence.
+   - Returns `PASS` or `RETRY` with a reason.
+
+If verification returns `RETRY`, the verifier feedback is sent back to the Retrieval + Answer Agent for revision.
+
+The verification loop is bounded to one retry.
+
+Do not introduce additional agents unless they solve a demonstrated problem that cannot be handled cleanly by the existing two-agent architecture.

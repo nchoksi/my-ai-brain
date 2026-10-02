@@ -40,3 +40,4 @@ google-auth==2.58.0
 google-auth-oauthlib==1.4.1
 sentence-transformers==6.1.0
 requests==2.34.2
+langgraph>=0.2,<2.0

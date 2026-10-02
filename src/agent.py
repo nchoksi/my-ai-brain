@@ -485,7 +485,9 @@ async def run_agent(
     llm: LocalLLM,
     user_question: str,
     conversation_history: list,
-) -> str:
+    revision_feedback: str = "",
+    return_details: bool = False,
+):
     """
     Run one user turn through a bounded reasoning/tool loop.
     """
@@ -508,6 +510,25 @@ async def run_agent(
             "content": user_question,
         }
     )
+
+    if revision_feedback:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"""
+A verifier rejected the previous draft. Revise the answer while still
+following the normal retrieval and grounding workflow.
+
+Verifier feedback:
+{revision_feedback}
+
+Do not accept the verifier feedback as evidence. Use connected sources and
+semantic memory as the evidence for the revised answer.
+""".strip(),
+            }
+        )
+
+    evidence = []
 
     # Bounded loop prevents unlimited tool execution.
     for _ in range(6):
@@ -719,6 +740,25 @@ Do not answer from assumptions or unrelated conversational context.
                 )
 
             # --------------------------------------------------
+            # Capture evidence for the Module 5 verifier.
+            # --------------------------------------------------
+            # Only evidence-bearing tools are retained. Discovery/indexing
+            # mechanics are intentionally excluded from verifier context.
+            if tool_name in {
+                "search_memory",
+                "read_project_notes",
+                "read_google_doc",
+                "read_github_file",
+                "read_slack_channel",
+            } and not observation.startswith("Tool execution failed:"):
+                evidence.append(
+                    {
+                        "tool": tool_name,
+                        "content": observation,
+                    }
+                )
+
+            # --------------------------------------------------
             # Feed completed tool observation back to the LLM
             # --------------------------------------------------
 
@@ -765,14 +805,30 @@ tool call.
             continue
 
         if response.startswith("FINAL:"):
-            return response.removeprefix("FINAL:").strip()
+            answer = response.removeprefix("FINAL:").strip()
+        else:
+            answer = response.strip()
 
-        return response.strip()
+        if return_details:
+            return {
+                "answer": answer,
+                "evidence": evidence,
+            }
 
-    return (
+        return answer
+
+    answer = (
         "I could not complete the request within the allowed "
         "number of tool steps."
     )
+
+    if return_details:
+        return {
+            "answer": answer,
+            "evidence": evidence,
+        }
+
+    return answer
 
 
 async def main():
@@ -807,7 +863,11 @@ async def main():
                 if not user_question:
                     continue
 
-                answer = await run_agent(
+                # Module 5: orchestrate the existing Retrieval/Answer Agent
+                # and the independent Verifier Agent with LangGraph.
+                from src.multi_agent import run_multi_agent
+
+                answer = await run_multi_agent(
                     session=session,
                     llm=llm,
                     user_question=user_question,
