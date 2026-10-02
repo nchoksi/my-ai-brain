@@ -195,3 +195,15 @@ If verification returns `RETRY`, the verifier feedback is sent back to the Retri
 The verification loop is bounded to one retry.
 
 Do not introduce additional agents unless they solve a demonstrated problem that cannot be handled cleanly by the existing two-agent architecture.
+
+## Module 6 Safety and Reliability Rules
+
+- Work-information answers must be grounded in retrieved evidence.
+- If no evidence is captured, do not allow a confident work answer to pass verification.
+- The Verifier may return `PASS`, `RETRY`, `REFUSE`, or `ESCALATE`.
+- Allow at most one retry. A repeated verification failure must end in a safe refusal.
+- Use freshness/status metadata only when it clearly establishes that one item supersedes another. Do not assume that a newer timestamp alone changes an earlier decision.
+- If important evidence remains materially conflicting or ambiguous, escalate for human review rather than choosing a version without support.
+- Keep external source integrations read-only. Do not add write/delete actions as part of this module.
+- Runtime traces should expose evidence count, verifier decision, retry, final outcome, and latency without exposing private chain-of-thought.
+- Keep the architecture at two agent roles: Retrieval + Answer and Verifier. Guardrails and evaluation are workflow controls, not additional agents.

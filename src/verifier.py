@@ -8,21 +8,30 @@ VERIFIER_SYSTEM_PROMPT = """
 You are the Verifier Agent for My AI Brain.
 
 Your job is to independently check whether a draft answer is supported by the
-retrieved evidence supplied to you.
+retrieved evidence supplied to you and choose the safest next action.
 
 Rules:
 - Treat the retrieved evidence as the only source of truth for work facts.
 - Do not add facts from your own knowledge.
+- Consider source metadata such as modified_time, source, project, and status
+  when it is present.
+- If two pieces of evidence conflict and one clearly supersedes the other based
+  on explicit status or reliable freshness metadata, prefer the superseding
+  evidence and explain why.
+- Do not assume that a newer timestamp automatically changes an older decision;
+  only resolve a conflict when the evidence makes the supersession clear.
 - PASS when the material claims in the draft are supported by the evidence.
-- RETRY when the draft invents facts, overstates evidence, contradicts the
-  evidence, or claims certainty that the evidence does not support.
+- RETRY when the evidence is usable but the draft invents facts, overstates the
+  evidence, contradicts it, or claims certainty that it does not support.
+- REFUSE when there is not enough evidence to provide a reliable work answer,
+  including after a bounded retry cannot repair the answer.
+- ESCALATE when evidence for an important decision remains materially
+  conflicting or ambiguous and choosing one version requires human judgment.
 - Do not reject a draft merely because wording differs from the evidence.
-- If no evidence was retrieved for a work-information answer, RETRY unless the
-  draft clearly says there is not enough information.
 
 Return JSON only in this exact shape:
 {
-  "decision": "PASS" or "RETRY",
+  "decision": "PASS" or "RETRY" or "REFUSE" or "ESCALATE",
   "reason": "short explanation"
 }
 """.strip()
@@ -43,7 +52,7 @@ def _extract_json(text: str) -> dict:
         match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
         if not match:
             return {
-                "decision": "RETRY",
+                "decision": "REFUSE",
                 "reason": "Verifier did not return a valid structured decision.",
             }
 
@@ -51,7 +60,7 @@ def _extract_json(text: str) -> dict:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             return {
-                "decision": "RETRY",
+                "decision": "REFUSE",
                 "reason": "Verifier returned malformed JSON.",
             }
 
@@ -62,7 +71,15 @@ def verify_answer(
     evidence: list[dict],
     draft_answer: str,
 ) -> dict:
-    """Run an independent verifier pass over question, evidence, and draft."""
+    """Verify grounding and select PASS, RETRY, REFUSE, or ESCALATE."""
+
+    # Deterministic guardrail: a work answer with no captured evidence should
+    # never be accepted merely because the model sounds confident.
+    if not evidence:
+        return {
+            "decision": "REFUSE",
+            "reason": "No retrieved evidence was captured for this work-information answer.",
+        }
 
     evidence_text = json.dumps(evidence, indent=2, ensure_ascii=False)
 
@@ -71,12 +88,14 @@ Original question:
 {question}
 
 Retrieved evidence:
-{evidence_text if evidence else "No retrieved evidence was captured."}
+{evidence_text}
 
 Draft answer:
 {draft_answer}
 
-Check whether the draft is grounded in the retrieved evidence.
+Check whether the draft is grounded in the retrieved evidence. Also check for
+materially conflicting or ambiguous evidence, using freshness/status metadata
+only when it clearly establishes which information supersedes another.
 """.strip()
 
     raw = llm.generate(
@@ -85,10 +104,10 @@ Check whether the draft is grounded in the retrieved evidence.
     )
 
     result = _extract_json(raw)
-    decision = str(result.get("decision", "RETRY")).upper()
+    decision = str(result.get("decision", "REFUSE")).upper()
 
-    if decision not in {"PASS", "RETRY"}:
-        decision = "RETRY"
+    if decision not in {"PASS", "RETRY", "REFUSE", "ESCALATE"}:
+        decision = "REFUSE"
 
     return {
         "decision": decision,

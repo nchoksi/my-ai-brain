@@ -860,9 +860,7 @@ The current implementation is intentionally limited in scope.
 - Retrieval currently uses top-k semantic similarity without reranking, query rewriting, hybrid retrieval, or other advanced RAG techniques.
 - `top_k = 3` can omit useful facts when relevant information is distributed across many chunks.
 - Project identity normalization currently handles simple naming variants rather than maintaining a general project/entity registry.
-- Retrieved information is not yet independently verified by a separate verifier agent.
-- Conflicting or outdated information is not yet automatically detected and resolved.
-- There is not yet a multi-agent workflow.
+- Conflict/freshness handling is conservative: the verifier uses metadata when available and escalates unresolved material conflicts rather than guessing.
 - Prompt instructions alone do not guarantee that the local LLM will invoke retrieval for every work-information question. Some controller-managed workflows improve reliability, but stronger grounding enforcement remains future work.
 - The current external integrations are read-only.
 - GitHub is not automatically searched for arbitrary project questions unless a relevant repository is known.
@@ -929,3 +927,37 @@ Verifier Agent
        Retrieval + Answer Agent
              ↓
           Verifier
+
+---
+
+## Module 6 — Guardrails, Safe Fallbacks, and Evaluation
+
+Module 6 adds reliability controls around the existing two-agent workflow without adding another agent.
+
+The Verifier now returns one of four decisions:
+
+- `PASS` — the draft is supported by retrieved evidence.
+- `RETRY` — the evidence is usable but the draft needs one bounded revision.
+- `REFUSE` — there is not enough reliable evidence for a definitive answer.
+- `ESCALATE` — important evidence remains materially conflicting or ambiguous and requires human judgment.
+
+The verifier considers source metadata such as `modified_time`, `status`, `source`, and `project` when available. Newer information is not automatically treated as correct; a conflict is resolved only when the evidence clearly establishes supersession. Otherwise the workflow escalates rather than guessing.
+
+A deterministic no-evidence guardrail prevents work-information answers from passing verification when no retrieved evidence was captured. After the single allowed retry, another verification failure ends in a safe refusal rather than returning an unsupported draft.
+
+Runtime output records evidence count, verifier decision, retry count, final outcome, and end-to-end latency. `src/evaluation.py` provides a lightweight structure for recording the Assignment 6 metrics: answer correctness, groundedness, retrieval quality, verifier effectiveness, fallback success, and latency.
+
+The external integrations remain read-only, preserving the tool-access limitation from the safety plan.
+
+```text
+Retrieve + Generate
+       ↓
+     Verify
+       ↓
+     Decide
+  ┌────┼───────┬──────────┐
+ PASS RETRY   REFUSE    ESCALATE
+  ↓     ↓       ↓           ↓
+Answer Revise  Safe       Human
+       once   fallback     review
+```
